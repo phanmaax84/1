@@ -28,6 +28,8 @@ API_URL = "https://grow-a-garden-2-tracker.onrender.com/api/stock"
 MOSCOW_TZ = timezone(timedelta(hours=3))
 PORT = int(os.getenv("PORT", 10000))
 
+ITEMS_PER_PAGE = 8
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -56,10 +58,19 @@ def run_web():
 FILTERS_FILE = "filters.json"
 
 def load_filters() -> dict:
+    """
+    Формат:
+    {
+      "enabled": true/false,
+      "seeds": ["Carrot", "Bamboo", ...],
+      "crates": ["Ladder Crate", ...],
+      "gear": ["Trowel", ...]
+    }
+    """
     if os.path.exists(FILTERS_FILE):
         with open(FILTERS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"enabled": False, "items": []}
+    return {"enabled": False, "seeds": [], "crates": [], "gear": []}
 
 def save_filters(data: dict):
     with open(FILTERS_FILE, "w", encoding="utf-8") as f:
@@ -74,11 +85,13 @@ RARITY_EMOJI = {
     "Rare":      "🟦",
     "Epic":      "🟪",
     "Legendary": "🟨",
+    "Mythic":    "🔴",
     "Mythical":  "🔴",
     "Divine":    "🔱",
     "Prismatic": "🌈",
     "Celestial": "✨",
     "Exotic":    "💎",
+    "Super":     "⭐",
 }
 
 def rarity_icon(rarity: str) -> str:
@@ -87,14 +100,18 @@ def rarity_icon(rarity: str) -> str:
 # ═══════════════════════════════════════
 #              ПАРСИНГ API
 # ═══════════════════════════════════════
-def fetch_stock() -> dict | None:
+def fetch_all_items() -> dict:
+    """
+    Возвращает ВСЕ предметы (даже stock=0).
+    {"seeds": [...], "crates": [...], "gear": [...]}
+    """
     try:
         resp = requests.get(API_URL, timeout=20)
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         logger.error(f"Ошибка запроса к API: {e}")
-        return None
+        return {"seeds": [], "crates": [], "gear": []}
 
     shops = data.get("shops") if isinstance(data, dict) else data
     if shops is None:
@@ -103,7 +120,6 @@ def fetch_stock() -> dict | None:
     result = {"seeds": [], "crates": [], "gear": []}
 
     if not isinstance(shops, dict):
-        logger.error(f"Неожиданный формат shops: {type(shops)}")
         return result
 
     for key, value in shops.items():
@@ -111,7 +127,7 @@ def fetch_stock() -> dict | None:
 
         if "seed" in key_lower:
             target = "seeds"
-        elif "crate" in key_lower or "egg" in key_lower:
+        elif "crate" in key_lower:
             target = "crates"
         elif "gear" in key_lower or "tool" in key_lower:
             target = "gear"
@@ -129,30 +145,15 @@ def fetch_stock() -> dict | None:
             if not isinstance(item, dict):
                 continue
 
-            # Ищем количество в стоке
+            name = item.get("name") or item.get("Name") or "?"
+            rarity = item.get("rarity") or item.get("Rarity") or ""
+            price = item.get("price") or item.get("Price") or ""
+
             stock_count = None
             for skey in ("stock", "Stock", "quantity", "Quantity", "amount", "remaining"):
                 if skey in item:
                     stock_count = item[skey]
                     break
-
-            # Ищем в описании если не нашли
-            if stock_count is None:
-                desc = str(item.get("description", "") or "")
-                m = re.search(r"stock\s*[:\-]?\s*(\d+)", desc, re.IGNORECASE)
-                if m:
-                    stock_count = int(m.group(1))
-
-            # Пропускаем если нет в наличии
-            try:
-                if stock_count is not None and int(stock_count) <= 0:
-                    continue
-            except (ValueError, TypeError):
-                pass
-
-            name = item.get("name") or item.get("Name") or "?"
-            rarity = item.get("rarity") or item.get("Rarity") or ""
-            price = item.get("price") or item.get("Price") or ""
 
             result[target].append({
                 "name": name,
@@ -160,6 +161,24 @@ def fetch_stock() -> dict | None:
                 "price": price,
                 "stock": stock_count,
             })
+
+    return result
+
+
+def fetch_stock() -> dict:
+    """Возвращает только предметы со stock >= 1."""
+    all_items = fetch_all_items()
+
+    result = {"seeds": [], "crates": [], "gear": []}
+
+    for category in ("seeds", "crates", "gear"):
+        for item in all_items[category]:
+            try:
+                if item["stock"] is not None and int(item["stock"]) <= 0:
+                    continue
+            except (ValueError, TypeError):
+                pass
+            result[category].append(item)
 
     return result
 
@@ -172,18 +191,26 @@ def build_message(stock: dict) -> str:
 
     filt = load_filters()
     filter_enabled = filt.get("enabled", False)
-    allowed_items = set(i.lower() for i in filt.get("items", []))
+    allowed_seeds = set(i.lower() for i in filt.get("seeds", []))
+    allowed_crates = set(i.lower() for i in filt.get("crates", []))
+    allowed_gear = set(i.lower() for i in filt.get("gear", []))
 
-    def should_show(name: str) -> bool:
+    def should_show(name: str, category: str) -> bool:
         if not filter_enabled:
             return True
-        return name.lower() in allowed_items
+        if category == "seeds":
+            return name.lower() in allowed_seeds
+        elif category == "crates":
+            return name.lower() in allowed_crates
+        elif category == "gear":
+            return name.lower() in allowed_gear
+        return True
 
     # ── Семена ──
     lines.append("🌱 Семена:")
     seed_lines = []
     for s in stock["seeds"]:
-        if should_show(s["name"]):
+        if should_show(s["name"], "seeds"):
             r = rarity_icon(s["rarity"])
             stock_txt = f" (x{s['stock']})" if s["stock"] is not None else ""
             seed_lines.append(f"  {r} {s['name']}{stock_txt}")
@@ -194,7 +221,7 @@ def build_message(stock: dict) -> str:
     lines.append("📦 Крэйты:")
     crate_lines = []
     for s in stock["crates"]:
-        if should_show(s["name"]):
+        if should_show(s["name"], "crates"):
             r = rarity_icon(s["rarity"])
             stock_txt = f" (x{s['stock']})" if s["stock"] is not None else ""
             crate_lines.append(f"  {r} {s['name']}{stock_txt}")
@@ -205,7 +232,7 @@ def build_message(stock: dict) -> str:
     lines.append("🚿 Инструменты:")
     gear_lines = []
     for s in stock["gear"]:
-        if should_show(s["name"]):
+        if should_show(s["name"], "gear"):
             r = rarity_icon(s["rarity"])
             stock_txt = f" (x{s['stock']})" if s["stock"] is not None else ""
             gear_lines.append(f"  {r} {s['name']}{stock_txt}")
@@ -218,10 +245,6 @@ def build_message(stock: dict) -> str:
 # ═══════════════════════════════════════
 async def send_stock_to_channel(bot):
     stock = fetch_stock()
-    if stock is None:
-        logger.warning("Не удалось получить сток — пропускаю")
-        return
-
     msg = build_message(stock)
 
     try:
@@ -259,11 +282,10 @@ async def scheduler(bot):
             minute=next_minute,
             second=5,
             microsecond=0,
-            tzinfo=MOSCOW_TZ
+            tzinfo=MOSCOW_TZ,
         )
 
         wait = (next_run - now).total_seconds()
-
         if wait <= 0:
             wait = 305
 
@@ -274,6 +296,7 @@ async def scheduler(bot):
 
         await asyncio.sleep(wait)
         await send_stock_to_channel(bot)
+
 # ═══════════════════════════════════════
 #            ПРОВЕРКА АДМИНА
 # ═══════════════════════════════════════
@@ -304,7 +327,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Доступные команды:\n"
         "🌱 /stock — посмотреть текущий сток в личке\n"
         "📤 /send — отправить сток в канал прямо сейчас\n"
-        "🔧 /filter — выбрать предметы для оповещений\n"
+        "🔧 /filter — настроить фильтр предметов\n"
         "🗑 /clearfilter — сбросить фильтр (показывать всё)"
     )
 
@@ -315,11 +338,6 @@ async def cmd_stock(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("⏳ Получаю сток...")
     stock = fetch_stock()
-
-    if stock is None:
-        await update.message.reply_text("❌ Не удалось получить данные от API.")
-        return
-
     await update.message.reply_text(build_message(stock))
 
 async def cmd_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -335,64 +353,72 @@ async def cmd_clearfilter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
-    save_filters({"enabled": False, "items": []})
+    save_filters({"enabled": False, "seeds": [], "crates": [], "gear": []})
     await update.message.reply_text("🗑 Фильтр сброшен — показываются все предметы.")
 
+# ═══════════════════════════════════════
+#      ФИЛЬТР — ГЛАВНОЕ МЕНЮ МАГАЗИНОВ
+# ═══════════════════════════════════════
 async def cmd_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update):
         return
 
-    await update.message.reply_text("⏳ Получаю список предметов...")
-    stock = fetch_stock()
+    await update.message.reply_text("⏳ Загружаю список предметов...")
 
-    if stock is None:
-        await update.message.reply_text("❌ Не удалось получить данные — попробуй позже.")
-        return
-
-    all_items = sorted({
-        item["name"]
-        for category in ("seeds", "crates", "gear")
-        for item in stock[category]
-    })
-
-    if not all_items:
-        await update.message.reply_text("Сейчас предметов в стоке нет.")
-        return
-
-    filt = load_filters()
-    current = set(i.lower() for i in filt.get("items", []))
+    all_items = fetch_all_items()
 
     context.user_data["filter_all_items"] = all_items
-    context.user_data["filter_selected"] = {
-        name for name in all_items if name.lower() in current
-    }
 
-    await _send_filter_keyboard(update.message, context, edit=False)
+    # Загружаем текущий фильтр
+    filt = load_filters()
+    context.user_data["filter_seeds"] = set(filt.get("seeds", []))
+    context.user_data["filter_crates"] = set(filt.get("crates", []))
+    context.user_data["filter_gear"] = set(filt.get("gear", []))
 
-# ═══════════════════════════════════════
-#           ФИЛЬТР — КЛАВИАТУРА
-# ═══════════════════════════════════════
-async def _send_filter_keyboard(target, context: ContextTypes.DEFAULT_TYPE, edit: bool):
-    all_items = context.user_data["filter_all_items"]
-    selected = context.user_data["filter_selected"]
+    await send_shop_menu(update.message, context, edit=False)
+
+
+async def send_shop_menu(target, context: ContextTypes.DEFAULT_TYPE, edit: bool):
+    seeds_count = len(context.user_data.get("filter_seeds", set()))
+    crates_count = len(context.user_data.get("filter_crates", set()))
+    gear_count = len(context.user_data.get("filter_gear", set()))
+
+    all_items = context.user_data.get("filter_all_items", {})
+    total_seeds = len(all_items.get("seeds", []))
+    total_crates = len(all_items.get("crates", []))
+    total_gear = len(all_items.get("gear", []))
 
     buttons = [
         [InlineKeyboardButton(
-            f"{'✅' if name in selected else '☐'} {name}",
-            callback_data=f"ftoggle|{name}"
-        )]
-        for name in all_items
+            f"🌱 Семена ({seeds_count}/{total_seeds})",
+            callback_data="fshop|seeds|0"
+        )],
+        [InlineKeyboardButton(
+            f"📦 Крэйты ({crates_count}/{total_crates})",
+            callback_data="fshop|crates|0"
+        )],
+        [InlineKeyboardButton(
+            f"🚿 Инструменты ({gear_count}/{total_gear})",
+            callback_data="fshop|gear|0"
+        )],
+        [
+            InlineKeyboardButton("✅ Выбрать все", callback_data="fall_select"),
+            InlineKeyboardButton("☐ Снять все", callback_data="fall_deselect"),
+        ],
+        [
+            InlineKeyboardButton("💾 Сохранить фильтр", callback_data="fsave"),
+            InlineKeyboardButton("🗑 Сбросить", callback_data="freset"),
+        ],
     ]
-    buttons.append([
-        InlineKeyboardButton("💾 Применить фильтр", callback_data="fapply"),
-        InlineKeyboardButton("🗑 Показывать всё", callback_data="fclear"),
-    ])
 
     markup = InlineKeyboardMarkup(buttons)
     text = (
-        "Выбери предметы для оповещения в канале.\n"
-        "Нажми на предмет чтобы вкл/выкл ✅\n"
-        "Затем нажми «Применить фильтр»."
+        "🔧 Настройка фильтра\n\n"
+        "Выбери магазин для настройки.\n"
+        "Затем нажми «Сохранить фильтр».\n\n"
+        f"🌱 Семена: {seeds_count} из {total_seeds}\n"
+        f"📦 Крэйты: {crates_count} из {total_crates}\n"
+        f"🚿 Инструменты: {gear_count} из {total_gear}"
     )
 
     if edit:
@@ -400,6 +426,98 @@ async def _send_filter_keyboard(target, context: ContextTypes.DEFAULT_TYPE, edit
     else:
         await target.reply_text(text=text, reply_markup=markup)
 
+
+# ═══════════════════════════════════════
+#     ФИЛЬТР — СПИСОК ПРЕДМЕТОВ МАГАЗИНА
+# ═══════════════════════════════════════
+def get_shop_emoji(shop: str) -> str:
+    return {"seeds": "🌱", "crates": "📦", "gear": "🚿"}.get(shop, "")
+
+def get_shop_name(shop: str) -> str:
+    return {"seeds": "Семена", "crates": "Крэйты", "gear": "Инструменты"}.get(shop, "")
+
+def get_selected_set_key(shop: str) -> str:
+    return f"filter_{shop}"
+
+
+async def send_shop_items(query, context: ContextTypes.DEFAULT_TYPE, shop: str, page: int):
+    all_items = context.user_data.get("filter_all_items", {})
+    items = all_items.get(shop, [])
+    selected: set = context.user_data.get(get_selected_set_key(shop), set())
+
+    total_pages = max(1, (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+    if page < 0:
+        page = 0
+    if page >= total_pages:
+        page = total_pages - 1
+
+    start = page * ITEMS_PER_PAGE
+    end = start + ITEMS_PER_PAGE
+    page_items = items[start:end]
+
+    buttons = []
+
+    # Кнопки выбрать все / снять все для этого магазина
+    buttons.append([
+        InlineKeyboardButton(
+            "✅ Выбрать все в магазине",
+            callback_data=f"fshopall|{shop}|select"
+        ),
+        InlineKeyboardButton(
+            "☐ Снять все в магазине",
+            callback_data=f"fshopall|{shop}|deselect"
+        ),
+    ])
+
+    for item in page_items:
+        name = item["name"]
+        rarity = item["rarity"]
+        r = rarity_icon(rarity)
+        check = "✅" if name in selected else "☐"
+        buttons.append([
+            InlineKeyboardButton(
+                f"{check} {r} {name} [{rarity}]",
+                callback_data=f"ftoggle|{shop}|{name}"
+            )
+        ])
+
+    # Навигация
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ Назад", callback_data=f"fshop|{shop}|{page - 1}")
+        )
+    nav_buttons.append(
+        InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="fnoop")
+    )
+    if page < total_pages - 1:
+        nav_buttons.append(
+            InlineKeyboardButton("Вперёд ➡️", callback_data=f"fshop|{shop}|{page + 1}")
+        )
+    buttons.append(nav_buttons)
+
+    # Кнопка назад в меню
+    buttons.append([
+        InlineKeyboardButton("🔙 Назад в меню", callback_data="fmenu")
+    ])
+
+    markup = InlineKeyboardMarkup(buttons)
+
+    emoji = get_shop_emoji(shop)
+    shop_name = get_shop_name(shop)
+    text = (
+        f"{emoji} {shop_name}\n\n"
+        f"Выбрано: {len(selected)} из {len(items)}\n"
+        f"Страница {page + 1}/{total_pages}\n\n"
+        "Нажми на предмет чтобы вкл/выкл ✅"
+    )
+
+    await query.edit_message_text(text=text, reply_markup=markup)
+
+
+# ═══════════════════════════════════════
+#          ОБРАБОТКА CALLBACK
+# ═══════════════════════════════════════
 async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -409,44 +527,123 @@ async def filter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    if data.startswith("ftoggle|"):
-        name = data.split("|", 1)[1]
-        selected: set = context.user_data.get("filter_selected", set())
+    # ── Назад в главное меню ──
+    if data == "fmenu":
+        await send_shop_menu(query, context, edit=True)
+
+    # ── Открыть магазин ──
+    elif data.startswith("fshop|"):
+        parts = data.split("|")
+        shop = parts[1]
+        page = int(parts[2]) if len(parts) > 2 else 0
+        await send_shop_items(query, context, shop, page)
+
+    # ── Переключить предмет ──
+    elif data.startswith("ftoggle|"):
+        parts = data.split("|")
+        shop = parts[1]
+        name = parts[2]
+        key = get_selected_set_key(shop)
+        selected: set = context.user_data.get(key, set())
 
         if name in selected:
             selected.discard(name)
         else:
             selected.add(name)
 
-        context.user_data["filter_selected"] = selected
-        await _send_filter_keyboard(query, context, edit=True)
+        context.user_data[key] = selected
 
-    elif data == "fapply":
-        selected = context.user_data.get("filter_selected", set())
-        if not selected:
-            save_filters({"enabled": False, "items": []})
+        # Определяем текущую страницу
+        all_items = context.user_data.get("filter_all_items", {})
+        items = all_items.get(shop, [])
+        names = [i["name"] for i in items]
+        try:
+            idx = names.index(name)
+            page = idx // ITEMS_PER_PAGE
+        except ValueError:
+            page = 0
+
+        await send_shop_items(query, context, shop, page)
+
+    # ── Выбрать / снять все в магазине ──
+    elif data.startswith("fshopall|"):
+        parts = data.split("|")
+        shop = parts[1]
+        action = parts[2]
+        key = get_selected_set_key(shop)
+        all_items = context.user_data.get("filter_all_items", {})
+        items = all_items.get(shop, [])
+
+        if action == "select":
+            context.user_data[key] = {i["name"] for i in items}
+        else:
+            context.user_data[key] = set()
+
+        await send_shop_items(query, context, shop, 0)
+
+    # ── Выбрать ВСЕ во всех магазинах ──
+    elif data == "fall_select":
+        all_items = context.user_data.get("filter_all_items", {})
+        for shop in ("seeds", "crates", "gear"):
+            items = all_items.get(shop, [])
+            context.user_data[get_selected_set_key(shop)] = {i["name"] for i in items}
+        await send_shop_menu(query, context, edit=True)
+
+    # ── Снять ВСЕ во всех магазинах ──
+    elif data == "fall_deselect":
+        for shop in ("seeds", "crates", "gear"):
+            context.user_data[get_selected_set_key(shop)] = set()
+        await send_shop_menu(query, context, edit=True)
+
+    # ── Сохранить фильтр ──
+    elif data == "fsave":
+        seeds = list(context.user_data.get("filter_seeds", set()))
+        crates = list(context.user_data.get("filter_crates", set()))
+        gear = list(context.user_data.get("filter_gear", set()))
+
+        total = len(seeds) + len(crates) + len(gear)
+
+        if total == 0:
+            save_filters({"enabled": False, "seeds": [], "crates": [], "gear": []})
             await query.edit_message_text(
                 "⚠️ Ни один предмет не выбран — показываю всё."
             )
         else:
-            save_filters({"enabled": True, "items": list(selected)})
-            items_list = "\n".join(f"  • {n}" for n in sorted(selected))
-            await query.edit_message_text(
-                f"✅ Фильтр сохранён!\n\nОповещаю только о:\n{items_list}"
-            )
+            save_filters({
+                "enabled": True,
+                "seeds": seeds,
+                "crates": crates,
+                "gear": gear,
+            })
 
-    elif data == "fclear":
-        save_filters({"enabled": False, "items": []})
-        context.user_data["filter_selected"] = set()
-        await query.edit_message_text(
-            "🗑 Фильтр сброшен — показываются все предметы."
-        )
+            text = f"✅ Фильтр сохранён!\n\nВсего выбрано: {total}\n\n"
+            if seeds:
+                text += "🌱 Семена:\n" + "\n".join(f"  • {n}" for n in sorted(seeds)) + "\n\n"
+            if crates:
+                text += "📦 Крэйты:\n" + "\n".join(f"  • {n}" for n in sorted(crates)) + "\n\n"
+            if gear:
+                text += "🚿 Инструменты:\n" + "\n".join(f"  • {n}" for n in sorted(gear))
 
+            await query.edit_message_text(text)
+
+    # ── Сбросить фильтр ──
+    elif data == "freset":
+        save_filters({"enabled": False, "seeds": [], "crates": [], "gear": []})
+        for shop in ("seeds", "crates", "gear"):
+            context.user_data[get_selected_set_key(shop)] = set()
+        await send_shop_menu(query, context, edit=True)
+
+    # ── Заглушка ──
+    elif data == "fnoop":
+        pass
+
+
+# ═══════════════════════════════════════
+#           ОБЫЧНЫЕ СООБЩЕНИЯ
+# ═══════════════════════════════════════
 async def fallback_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_admin(update):
-        await update.message.reply_text(
-            "Используй /start чтобы увидеть список команд."
-        )
+        await update.message.reply_text("Используй /start чтобы увидеть список команд.")
     else:
         await update.message.reply_text(NOT_ADMIN_TEXT)
 
@@ -473,9 +670,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Запускаем Flask в отдельном потоке
     threading.Thread(target=run_web, daemon=True).start()
     logger.info(f"Flask запущен на порту {PORT}")
-
-    # Запускаем бота
     asyncio.run(main())
