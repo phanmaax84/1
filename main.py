@@ -196,22 +196,25 @@ async def send_stock_to_channel(bot):
 
 # ───────────── Планировщик ─────────────
 async def scheduler(bot):
-    """Ждёт до ближайшей минуты кратной 5, потом шлёт каждые 5 мин."""
+    """Отправляет сток каждые 5 минут с небольшим запасом."""
     while True:
         now = datetime.now(MOSCOW_TZ)
+        
+        # Вычисляем следующую минуту кратную 5
         minutes_to_next = 5 - (now.minute % 5)
-        if minutes_to_next == 5 and now.second == 0:
-            minutes_to_next = 0
-
-        next_run = now.replace(second=0, microsecond=0) + timedelta(minutes=minutes_to_next)
+        if minutes_to_next == 0:
+            minutes_to_next = 5
+        
+        next_run = now.replace(second=1, microsecond=0) + timedelta(minutes=minutes_to_next)
         wait = (next_run - now).total_seconds()
+        
+        # Добавляем 1 секунду запаса чтобы сток успел обновиться
         if wait <= 0:
-            wait = 300
-
-        logger.info(f"Следующая отправка через {wait:.0f} сек ({next_run.strftime('%H:%M')})")
+            wait = 301
+        
+        logger.info(f"Следующая отправка через {wait:.0f} сек ({next_run.strftime('%H:%M:%S')})")
         await asyncio.sleep(wait)
         await send_stock_to_channel(bot)
-        await asyncio.sleep(2)
 
 # ───────────── Проверка админа ─────────────
 def is_admin(update: Update) -> bool:
