@@ -235,25 +235,37 @@ async def send_stock_to_channel(bot):
 # ═══════════════════════════════════════
 async def scheduler(bot):
     """
-    Ждёт до следующей минуты кратной 5 + 1 секунда.
-    Например: 00:01, 05:01, 10:01, 15:01 ...
-    +1 секунда чтобы сток точно успел обновиться на сервере игры.
+    Отправка в минуты, кратные 5, с задержкой 5 секунд:
+    00:05, 05:05, 10:05, 15:05 и т.д.
     """
     while True:
         now = datetime.now(MOSCOW_TZ)
 
-        # Считаем сколько минут до следующей отметки кратной 5
-        current_minute = now.minute
-        minutes_to_next = 5 - (current_minute % 5)
-        if minutes_to_next == 0:
-            minutes_to_next = 5
+        next_minute = ((now.minute // 5) + 1) * 5
+        next_hour = now.hour
+        next_day = now.date()
 
-        # Время следующего запуска — кратная 5 минута + 1 секунда
-        next_run = now.replace(second=1, microsecond=0) + timedelta(minutes=minutes_to_next)
+        if next_minute >= 60:
+            next_minute = 0
+            temp = now + timedelta(hours=1)
+            next_hour = temp.hour
+            next_day = temp.date()
+
+        next_run = datetime(
+            year=next_day.year,
+            month=next_day.month,
+            day=next_day.day,
+            hour=next_hour,
+            minute=next_minute,
+            second=5,
+            microsecond=0,
+            tzinfo=MOSCOW_TZ
+        )
+
         wait = (next_run - now).total_seconds()
 
         if wait <= 0:
-            wait = 301
+            wait = 305
 
         logger.info(
             f"Следующая отправка через {int(wait)} сек. "
@@ -262,7 +274,6 @@ async def scheduler(bot):
 
         await asyncio.sleep(wait)
         await send_stock_to_channel(bot)
-
 # ═══════════════════════════════════════
 #            ПРОВЕРКА АДМИНА
 # ═══════════════════════════════════════
