@@ -737,8 +737,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🗑 /clearfilter — сбросить фильтр канала\n\n"
             "Команды юзера:\n"
             "🔔 /notify — настроить уведомления\n"
-            "🌤️ /weather — текущая погода и время"
-            "🌱 /stock — текущий сток\n"
+            "🌤️ /weather — текущая погода и время\n"
+            "🌱 /stock — текущий сток"
         )
         return
 
