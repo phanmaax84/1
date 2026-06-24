@@ -738,6 +738,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Команды юзера:\n"
             "🔔 /notify — настроить уведомления\n"
             "🌤️ /weather — текущая погода и время"
+            "🌱 /stock — текущий сток\n"
         )
         return
 
